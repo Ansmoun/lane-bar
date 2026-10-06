@@ -1,0 +1,17 @@
+#!/bin/sh
+cd "$(dirname "$0")"
+APP="$(pwd)"
+if [ -n "$LANETK_DIR" ] && [ -d "$LANETK_DIR/src/lib" ]; then
+    TK="$LANETK_DIR"
+elif [ "$APP" = "/opt/lane-bar" ] && [ -d "/opt/lanetk/src/lib" ]; then
+    TK="/opt/lanetk"
+elif [ -d "$HOME/proyectos/lanetk/src/lib" ]; then
+    TK="$HOME/proyectos/lanetk"
+elif [ -d "/opt/lanetk/src/lib" ]; then
+    TK="/opt/lanetk"
+else
+    echo "run: no se encuentra LaneTK" >&2
+    exit 1
+fi
+export LUA_PATH="$APP/?.lua;$APP/src/?.lua;$APP/src/?/init.lua;$TK/?.lua;$TK/src/?.lua;$TK/src/?/init.lua;;"
+exec luajit "$@"
