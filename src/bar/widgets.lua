@@ -542,11 +542,21 @@ M.tasklist = function(T, srv, ctx)
     local GAP         = 4
     local ITEM_W      = ICON_SIZE + PAD_X * 2
     local ITEM_H      = ICON_SIZE + 4
-    local POLL_MS     = 500
 
-    local D        = require("lib.data.launcher")
-    local Icons    = require("lib.icons")
-    local svg      = require("lib.svg")
+    local D     = require("lib.data.launcher")
+    local Icons = require("lib.icons")
+    local svg   = require("lib.svg")
+    local log   = require("lib.log")
+
+    local ewmh = ctx and ctx.ewmh
+    if not ewmh then
+        log.warn("bar", "tasklist: sin ewmh en ctx, no se puede inicializar")
+        return {
+            widget = Area.new({}),
+            start  = function() end,
+            stop   = function() end,
+        }
+    end
 
     local TaskList = setmetatable({}, { __index = Area })
     TaskList.__index = TaskList
@@ -565,8 +575,16 @@ M.tasklist = function(T, srv, ctx)
     end
 
     function TaskList:set_windows(list)
+        local count_changed = (#list ~= #self.windows)
         self.windows = list
-        self:damage()
+        -- Si cambió la cantidad de items, el ancho que pedimos
+        -- cambió también: hay que pedir relayout del árbol completo
+        -- para que el Group nos reasigne un rect más ancho/angosto.
+        if count_changed then
+            self:invalidate_layout()
+        else
+            self:damage()
+        end
     end
 
     function TaskList:draw(cr)
@@ -580,8 +598,6 @@ M.tasklist = function(T, srv, ctx)
             local x = self.x0 + (i - 1) * (ITEM_W + GAP)
             local active = w.active
             local hover  = (i == self.hover_idx)
-
-            -- Barra inferior de "activo" (estilo Win10).
             if active then
                 cairo.set_rgba(cr, accent[1], accent[2], accent[3], 0.25)
                 cairo.rounded_rect(cr, x + 1, y + 2, ITEM_W - 2, h - 4, 4)
@@ -594,15 +610,12 @@ M.tasklist = function(T, srv, ctx)
                 cairo.rounded_rect(cr, x + 1, y + 2, ITEM_W - 2, h - 4, 4)
                 cairo.fill(cr)
             end
-
             if w.surface then
                 cairo.draw_surface(cr, w.surface,
                     x + PAD_X, y + (h - ICON_SIZE) / 2,
                     ICON_SIZE, ICON_SIZE)
             else
-                -- Fallback: letra inicial de name o class.
                 local label = (w.name or w.class or "?")
-                -- Si name tiene "—" usamos lo que sigue (más limpio).
                 local after = label:match("—%s*(.+)$")
                 if after then label = after end
                 local letter = label:sub(1, 1):upper()
@@ -613,6 +626,16 @@ M.tasklist = function(T, srv, ctx)
                     { r = fg[1], g = fg[2], b = fg[3] })
             end
         end
+    end
+
+    function TaskList:askMinMax(minw, minh, maxw, maxh)
+        local n = #self.windows
+        local total = 0
+        if n > 0 then
+            total = n * ITEM_W + (n - 1) * GAP
+        end
+        return minw + total, minh + self.min_h,
+               maxw + total, maxh + self.max_h
     end
 
     function TaskList:on_mouse_move(mx, my)
@@ -632,8 +655,6 @@ M.tasklist = function(T, srv, ctx)
             local x0 = (i - 1) * (ITEM_W + GAP)
             if mx >= x0 and mx < x0 + ITEM_W then
                 if button == 1 then
-                    -- Enfocar. Si la ventana está en otro desktop, bspc
-                    -- la trae automáticamente con -f.
                     os.execute(string.format(
                         "bspc node %s -f >/dev/null 2>&1 &", w.id))
                 elseif button == 3 then
@@ -646,30 +667,16 @@ M.tasklist = function(T, srv, ctx)
     end
 
     local widget = TaskList.new {}
-
-    -- Cache: "key" -> surface | false
     local icon_cache = {}
 
-    -- Cascada de resolución de icono:
-    --   1. name en LANE_NAME_TO_ICON → Icons.surface (iconos del proyecto)
-    --   2. WMCLASS_ICON_ALIAS[class] → D.find_icon
-    --   3. D.find_icon(class)
-    --   4. D.find_icon(name)
-    --   5. Icons.surface(class) o Icons.surface(name)
-    --   6. nil → fallback a letra inicial
     local function resolve_icon(w)
         local cache_key = (w.class or "") .. "|" .. (w.name or "")
         local cached = icon_cache[cache_key]
         if cached ~= nil then return cached or nil end
-
         local surf = nil
-
-        -- Paso 1: name en tabla LANE.
         if w.name and LANE_NAME_TO_ICON[w.name] then
             surf = Icons.surface(LANE_NAME_TO_ICON[w.name], ICON_SIZE)
         end
-
-        -- Paso 2-3: class (con y sin sinónimo).
         if not surf and w.class and w.class ~= "" then
             local cls = w.class:lower()
             local alias = WMCLASS_ICON_ALIAS[cls]
@@ -682,8 +689,6 @@ M.tasklist = function(T, srv, ctx)
                 end
             end
         end
-
-        -- Paso 4: name completo.
         if not surf and w.name and w.name ~= "" then
             local path = D.find_icon(w.name:lower())
             if path then
@@ -694,84 +699,169 @@ M.tasklist = function(T, srv, ctx)
                 end
             end
         end
-
-        -- Paso 5: Icons del proyecto (fallback).
         if not surf then
             surf = Icons.surface(w.class or "", ICON_SIZE)
             if not surf and w.name then
                 surf = Icons.surface(w.name, ICON_SIZE)
             end
         end
-
         icon_cache[cache_key] = surf or false
         return surf
     end
 
-    local timer
-    local function refresh()
-        if not ctx or not ctx.sess then return end
+    local function current_monitor()
         local dock = ctx.sess:get("dock")
-        local mon = dock and dock.monitor
-        if not mon then return end
+        return dock and dock.monitor or nil
+    end
 
-        local leaves = bspc_leaves(mon)
-        local ids = {}
-        for _, w in ipairs(leaves) do ids[#ids + 1] = { id = w.id } end
-        local meta = xprop_batch(ids)
+    -- Sincronización completa: se invoca desde start() y desde el
+    -- callback de eventos X (no hay polling).
+    -- Lista global de ventanas via EWMH (client_list). Sin filtro
+    -- de monitor ni workspace: todas las ventanas gestionadas
+    -- aparecen en el tasklist, como hacen las taskbars modernas.
+    local function all_windows()
+        local out = {}
+        for _, wid in ipairs(ewmh:client_list()) do
+            out[#out + 1] = {
+                id     = string.format("0x%x", wid),
+                id_dec = wid,
+            }
+        end
+        return out
+    end
 
-        -- Ventana activa: la que tiene el foco del WM en este monitor.
-        local active_id = nil
-        do
-            local h = io.popen(string.format(
-                "bspc query -N -m %s -n '.active' 2>/dev/null", mon))
-            if h then
-                active_id = h:read("*l")
-                h:close()
+    -- Cache por wid: evitamos xprop repetido para ventanas ya
+    -- conocidas. Solo hacemos xprop cuando aparece una ventana
+    -- nueva (no está en el cache).
+    local window_cache = {}   -- wid_hex -> { class, name, surface }
+
+    local function fetch_meta(wid_hex)
+        -- xprop para una sola ventana. El batch de xprop no respeta
+        -- el orden de los ids, por eso no lo usamos.
+        local h = io.popen(string.format(
+            "xprop -id %s WM_CLASS _NET_WM_NAME 2>/dev/null", wid_hex))
+        if not h then return { class = nil, name = nil } end
+        local meta = { class = nil, name = nil }
+        for line in h:lines() do
+            local cls = line:match('WM_CLASS%(STRING%)%s*=%s*"([^"]+)",%s*"([^"]+)"')
+            if cls then
+                -- Segundo string es la clase. Guardamos como tabla
+                -- para mantener la compat con resolve_icon.
+                meta.class = { line:match('"([^"]+)"%s*,%s*"([^"]+)"') }
+                -- Mejor re-extraer los dos:
+                local a, b = line:match('"([^"]+)"%s*,%s*"([^"]+)"')
+                meta.class = { a, b }
             end
-            if not active_id or active_id == "" then
-                h = io.popen(
-                    "bspc query -N -n 'focused' 2>/dev/null")
-                if h then
-                    active_id = h:read("*l")
-                    h:close()
-                end
+            local nm = line:match('_NET_WM_NAME%(UTF8_STRING%)%s*=%s*"([^"]*)"')
+            if nm then meta.name = nm end
+        end
+        h:close()
+        return meta
+    end
+
+    local function sync()
+        local c = ewmh:client_list()
+        local active_dec = ewmh:active_window()
+
+        -- 1. Marcar los wids vivos para purgar el cache al final.
+        local live = {}
+        for _, wid in ipairs(c) do live[wid] = true end
+
+        -- 2. Purgar cache de ventanas cerradas.
+        for wid_hex in pairs(window_cache) do
+            local num = tonumber(wid_hex)
+            if not num or not live[num] then
+                window_cache[wid_hex] = nil
             end
         end
 
+        -- 3. Reconstruir la lista; para cada wid, tomar del cache
+        -- o fetchear si es nueva.
         local out = {}
-        for _, w in ipairs(leaves) do
-            local m = meta[w.id] or {}
-            local class = m.class and (m.class[2] or m.class[1])
-            local item = {
-                id = w.id,
-                class = class,
-                name = m.name,
-                active = (w.id == active_id),
-            }
-            item.surface = resolve_icon(item)
-            out[#out + 1] = item
+        for _, wid in ipairs(c) do
+            local wid_hex = string.format("0x%x", wid)
+            local entry = window_cache[wid_hex]
+            if not entry then
+                local meta = fetch_meta(wid_hex)
+                local class = meta.class and (meta.class[2] or meta.class[1])
+                local item = {
+                    id    = wid_hex,
+                    class = class,
+                    name  = meta.name,
+                }
+                item.surface = resolve_icon(item)
+                entry = item
+                window_cache[wid_hex] = entry
+            end
+            entry.active = (active_dec ~= nil and wid == active_dec)
+            out[#out + 1] = entry
         end
         widget:set_windows(out)
+    end
+
+    -- Suscripción event-driven: reaccionamos a los PropertyNotify del
+    -- root que nos interesan. Sin polling.
+    --
+    --   _NET_CLIENT_LIST      -> alta/baja de ventanas
+    --   _NET_ACTIVE_WINDOW    -> cambio de foco
+    --   _NET_CURRENT_DESKTOP  -> cambio de escritorio
+    -- Suscripción X: reaccionamos a los PropertyNotify del root.
+    --   _NET_CLIENT_LIST      -> alta/baja de ventanas
+    --   _NET_ACTIVE_WINDOW    -> cambio de foco
+    --   _NET_CURRENT_DESKTOP  -> cambio de escritorio
+    local last_mon = nil
+
+    local function sync_if_monitor_changed()
+        local mon = current_monitor()
+        if mon and mon ~= last_mon then
+            last_mon = mon
+            local ok, err = pcall(sync)
+            if not ok then
+                log.warn("bar", "tasklist sync (monitor) fallo: %s",
+                    tostring(err))
+            end
+        end
+    end
+
+    local sub_id = ewmh:subscribe(function(atom, wid)
+        if atom == ewmh.atoms._NET_CLIENT_LIST
+           or atom == ewmh.atoms._NET_ACTIVE_WINDOW
+           or atom == ewmh.atoms._NET_CURRENT_DESKTOP then
+            local ok, err = pcall(sync)
+            if not ok then
+                log.warn("bar", "tasklist sync fallo: %s", tostring(err))
+            end
+        end
+    end)
+
+    -- Suscripción a session.dock: cuando la barra publica/actualiza el
+    -- monitor, re-sincronizamos. Sin esto, el primer sync (durante
+    -- start) puede correr antes de que el dock exista y quedar vacío
+    -- hasta el próximo PropertyNotify del root.
+    if ctx and ctx.sess and ctx.sess.on then
+        ctx.sess:on("dock", function()
+            sync_if_monitor_changed()
+        end)
     end
 
     return {
         widget = widget,
         start = function()
-            local ok, err = pcall(refresh)
+            -- Primer sync: si el monitor todavía no está publicado,
+            -- sync() deja el tasklist vacío. El subscriber a
+            -- session.dock se va a encargar de re-sincronizar
+            -- cuando la barra publique el monitor.
+            local ok, err = pcall(sync_if_monitor_changed)
             if not ok then
-                require("lib.log").warn("bar",
-                    "tasklist refresh (start) fallo: %s", tostring(err))
+                log.warn("bar", "tasklist sync (start) fallo: %s",
+                    tostring(err))
             end
-            timer = srv:add_timer(POLL_MS, function()
-                local ok2, err2 = pcall(refresh)
-                if not ok2 then
-                    require("lib.log").warn("bar",
-                        "tasklist refresh fallo: %s", tostring(err2))
-                end
-            end)
         end,
         stop = function()
-            if timer then timer:cancel(); timer = nil end
+            if sub_id then ewmh:unsubscribe(sub_id); sub_id = nil end
+            if ctx and ctx.sess and ctx.sess.unwatch then
+                ctx.sess:unwatch("dock")
+            end
         end,
     }
 end

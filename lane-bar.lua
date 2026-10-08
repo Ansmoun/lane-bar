@@ -240,6 +240,43 @@ end
 -- despertar de mas al poll de 200ms de los otros clientes).
 local _last_published = nil
 
+-- bspwm no honra _NET_WM_STRUT de ventanas override_redirect con
+-- _NET_WM_WINDOW_TYPE_DOCK (deja el rect del monitor completo).
+-- Aplicamos el padding vía bspc config, que sí es respetado por el
+-- tileo. Se resetean los 4 lados antes de aplicar el nuevo, para
+-- que un cambio de borde (top→bottom) no deje padding huérfano.
+local _last_padding = nil
+local function apply_bspc_padding(geo)
+    if not current_mon then return end
+    local edge = geo.position or "top"
+    local value = (edge == "left" or edge == "right")
+                  and geo.w or geo.h
+    local key = current_mon.name .. ":" .. edge .. ":" .. value
+    if _last_padding == key then return end
+    _last_padding = key
+    local mon = current_mon.name
+    -- Resetear los cuatro lados y aplicar el nuevo.
+    os.execute(string.format(
+        "bspc config -m %s top_padding 0; "
+        .. "bspc config -m %s bottom_padding 0; "
+        .. "bspc config -m %s left_padding 0; "
+        .. "bspc config -m %s right_padding 0; "
+        .. "bspc config -m %s %s_padding %d",
+        mon, mon, mon, mon, mon, edge, value) .. " >/dev/null 2>&1 &")
+end
+
+local function clear_bspc_padding()
+    if not current_mon then return end
+    _last_padding = nil
+    local mon = current_mon.name
+    os.execute(string.format(
+        "bspc config -m %s top_padding 0; "
+        .. "bspc config -m %s bottom_padding 0; "
+        .. "bspc config -m %s left_padding 0; "
+        .. "bspc config -m %s right_padding 0",
+        mon, mon, mon, mon) .. " >/dev/null 2>&1 &")
+end
+
 local function write_dock_geometry(geo)
     local mon_name = current_mon and current_mon.name or ""
     local key = string.format("%d:%d:%d:%d:%s:%s",
@@ -258,6 +295,8 @@ local function write_dock_geometry(geo)
     end
 
     -- [SESSION] Canal nuevo.
+    apply_bspc_padding(geo)
+
     sess:set("dock", {
         present = true,
         x = geo.x, y = geo.y,
@@ -429,7 +468,7 @@ local function rebuild()
     local theme_draw_bg = SPEC.draw_bg
     local eff_spec  = effective_spec(build_spec(), style_mod)
     local geo = geometry.compute(eff_spec, mon)
-    local bar = engine.build(T, eff_spec, widgets, srv, { sess = sess })
+    local bar = engine.build(T, eff_spec, widgets, srv, { sess = sess, ewmh = ewmh_inst })
 
     local bg = T.bg_card_rgb or T.bg_rgb or { 0.1, 0.1, 0.1 }
     local bg_pixel = math.floor(bg[1] * 255) * 0x10000
@@ -553,6 +592,8 @@ srv:run()
 stopping = true
 stop_widgets()
 -- [SESSION] Despublicar y desregistrar el cliente.
+clear_bspc_padding()
+
 sess:clear("dock")
 sess:close()
 log.info("bar", "adios")
