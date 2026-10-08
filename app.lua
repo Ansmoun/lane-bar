@@ -73,10 +73,20 @@ if type(SPEC) ~= "table" then
 end
 
 local function pick_primary_screen()
-    local list = screens.list()
-    for _, s in ipairs(list) do
-        if s.name == "VGA-1" then return s end
+    -- Consultar el primario real de xrandr, no asumir VGA-1.
+    local h = io.popen(
+        "xrandr --query 2>/dev/null | grep ' primary ' | head -1 | awk '{print $1}'")
+    if h then
+        local name = h:read("*l")
+        h:close()
+        if name and name ~= "" then
+            for _, s in ipairs(screens.list()) do
+                if s.name == name then return s end
+            end
+        end
     end
+    -- Fallback: primer monitor conectado.
+    local list = screens.list()
     return list[1]
 end
 -- Se resuelve en rebuild() segun config.bar.monitor.
@@ -259,7 +269,7 @@ end
 
 local function follow_pointer()
     local cfg = config.get()
-    if not cfg.bar.follow_cursor then return end
+    if not resolve_follow_cursor(cfg) then return end
 
     if not bar_win or bar_win.destroyed then return end
     if not current_mon or not bar_spec then return end
@@ -326,6 +336,26 @@ local GEO_KEYS = {
     margin = true, x = true, y = true,
 }
 
+-- Construye el spec efectivo del tema aplicando los overrides de
+-- config.bar. Si el usuario no definió ninguno (position/height/
+-- margin todos nil), devuelve el tema tal cual. Si definió alguno,
+-- los mezcla sobre SPEC.geometry sin mutar el SPEC original.
+local function build_spec()
+    local cfg = config.get()
+    local base = SPEC
+    local over = {}
+    if cfg.bar.position then over.position = cfg.bar.position end
+    if cfg.bar.height   then over.height   = cfg.bar.height   end
+    if cfg.bar.margin   then over.margin   = cfg.bar.margin   end
+    if next(over) == nil then return base end
+    local out = {}
+    for k, v in pairs(base) do out[k] = v end
+    out.geometry = {}
+    for k, v in pairs(base.geometry or {}) do out.geometry[k] = v end
+    for k, v in pairs(over) do out.geometry[k] = v end
+    return out
+end
+
 local function effective_spec(spec, style_mod)
     local out = {}
     for k, v in pairs(style_mod.defaults or {}) do out[k] = v end
@@ -354,6 +384,25 @@ local function publish_dock_absent()
     sess:set("dock", { present = false })
 end
 
+-- Cascada de política para follow_cursor y monitor:
+--   config.bar.X  >  tema.X  >  default histórico
+--
+-- El config permite nil (usa el tema). El tema puede omitir el
+-- campo (usa el default histórico: true y "cursor").
+local function resolve_follow_cursor(cfg)
+    if cfg.bar.follow_cursor ~= nil then return cfg.bar.follow_cursor end
+    if SPEC.follow_cursor ~= nil then return SPEC.follow_cursor end
+    return true
+end
+
+local function resolve_monitor_name(cfg)
+    if cfg.bar.monitor and cfg.bar.monitor ~= "" then
+        return cfg.bar.monitor
+    end
+    if SPEC.monitor and SPEC.monitor ~= "" then return SPEC.monitor end
+    return "cursor"
+end
+
 local function rebuild()
     local cfg = config.get()
 
@@ -372,15 +421,15 @@ local function rebuild()
     end
     stop_widgets()
 
-    mon = resolve_monitor(cfg.bar.monitor)
+    mon = resolve_monitor(resolve_monitor_name(cfg))
 
     local style_mod = styles_mod.get(SPEC.style or "arrow")
     -- El tema puede sobreescribir el draw_bg del estilo. Útil para
     -- temas que quieren un fondo distinto sin duplicar el estilo.
     local theme_draw_bg = SPEC.draw_bg
-    local eff_spec  = effective_spec(SPEC, style_mod)
+    local eff_spec  = effective_spec(build_spec(), style_mod)
     local geo = geometry.compute(eff_spec, mon)
-    local bar = engine.build(T, eff_spec, widgets, srv)
+    local bar = engine.build(T, eff_spec, widgets, srv, { sess = sess })
 
     local bg = T.bg_card_rgb or T.bg_rgb or { 0.1, 0.1, 0.1 }
     local bg_pixel = math.floor(bg[1] * 255) * 0x10000
@@ -438,7 +487,7 @@ local function rebuild()
     end)
 
     if _follow_timer then _follow_timer:cancel(); _follow_timer = nil end
-    if cfg.bar.follow_cursor then
+    if resolve_follow_cursor(cfg) then
         _follow_timer = srv:add_timer(FOLLOW_MS, function()
             follow_pointer()
         end)

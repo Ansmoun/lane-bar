@@ -47,7 +47,7 @@ local function flatten_list(list)
 end
 
 -- Construye un lado (left/center/right) delegando al estilo.
-local function build_side(theme, list, registry, groups, opts, srv)
+local function build_side(theme, list, registry, groups, opts, srv, ctx)
     opts = opts or {}
     local style_name = opts.style or "arrow"
     local gap        = opts.gap or 12
@@ -72,7 +72,7 @@ local function build_side(theme, list, registry, groups, opts, srv)
         if not ctor then
             log.warn("bar", "constructor no encontrado: %s", item.name)
         else
-            local ok, res = pcall(ctor, theme, srv)
+            local ok, res = pcall(ctor, theme, srv, ctx)
             if not ok or not res then
                 log.error("bar", "constructor %s fallo: %s",
                     item.name, tostring(res))
@@ -137,7 +137,7 @@ function M.adjust_height(base_h, style_name)
 end
 
 -- Monta la barra completa.
-function M.build(theme, spec, registry, srv)
+function M.build(theme, spec, registry, srv, ctx)
     spec = spec or {}
     local sep_style = spec.style or spec.separator or "arrow"
     local base_h    = spec.height or 22
@@ -169,7 +169,7 @@ function M.build(theme, spec, registry, srv)
         for _, l in ipairs({ left_list, center_list, right_list }) do
             for _, it in ipairs(l) do all[#all + 1] = it end
         end
-        local built = build_side(theme, all, registry, groups, side_opts, srv)
+        local built = build_side(theme, all, registry, groups, side_opts, srv, ctx)
         local spacer = function()
             return W.Text.new { text = "", font = "DejaVu Sans 1" }
         end
@@ -186,9 +186,9 @@ function M.build(theme, spec, registry, srv)
         starts = built.starts
         stops = built.stops
     else
-        local left_b   = build_side(theme, left_list,   registry, groups, side_opts, srv)
-        local center_b = build_side(theme, center_list, registry, groups, side_opts, srv)
-        local right_b  = build_side(theme, right_list,  registry, groups, side_opts, srv)
+        local left_b   = build_side(theme, left_list,   registry, groups, side_opts, srv, ctx)
+        local center_b = build_side(theme, center_list, registry, groups, side_opts, srv, ctx)
+        local right_b  = build_side(theme, right_list,  registry, groups, side_opts, srv, ctx)
 
         root = W.Group.new {
             orientation = "horizontal",

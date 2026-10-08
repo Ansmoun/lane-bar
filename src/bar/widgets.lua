@@ -373,7 +373,7 @@ end
 --   size       : tamaño del icono (default 22)
 --   icon       : nombre del icono (default "start")
 --   command    : trigger file del launcher (default "/tmp/lane-launcher.cmd")
-M.start = function(T, srv)
+M.start = function(T, srv, ctx)
     local size = 22
     local ico_name = "start"
     local trigger  = "/tmp/lane-launcher.cmd"
@@ -381,14 +381,36 @@ M.start = function(T, srv)
     local rgb = { G.hex_to_rgba(hex) }
     local ico = make_icon(ico_name, rgb, size)
 
-    -- W.Icon dispara _on_click en on_mouse_press. NO usamos
-    -- opts.on_click: el Window lo duplica en ButtonRelease.
     ico._on_click = function()
         local f = io.open(trigger, "w")
         if f then f:write("toggle\n"); f:close() end
     end
 
-    return { widget = ico }
+    -- Publica la posición del botón en session para que el launcher
+    -- pueda anclarse a él (anchor = "start"). Se hace cada 500ms
+    -- porque la posición real solo se conoce después del primer
+    -- layout del árbol.
+    local timer
+    return {
+        widget = ico,
+        start = function()
+            timer = srv:add_timer(500, function()
+                if not ctx or not ctx.sess then return end
+                local w = (ico.x1 or 0) - (ico.x0 or 0)
+                if w > 0 then
+                    ctx.sess:set("start", {
+                        x = ico.x0, y = ico.y0,
+                        w = w,
+                        h = (ico.y1 or 0) - (ico.y0 or 0),
+                    })
+                end
+            end)
+        end,
+        stop = function()
+            if timer then timer:cancel(); timer = nil end
+            if ctx and ctx.sess then ctx.sess:clear("start") end
+        end,
+    }
 end
 
 function M.register(name, fn) M[name] = fn end

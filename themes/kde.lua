@@ -15,6 +15,11 @@ return {
     -- Fuerza todos los widgets a fg_normal, ignorando el color
     -- propio de telemetría (net=violeta, cpu=verde, etc).
     fg_mode = "flat",
+    -- Política por defecto del tema: barra fija en el monitor
+    -- primario, sin seguir al mouse. El usuario puede sobreescribir
+    -- desde config.bar.{follow_cursor,monitor}.
+    follow_cursor = false,
+    monitor       = "primary",
 
     geometry = {
         position = "top",
