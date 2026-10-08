@@ -39,10 +39,49 @@ local function pick_primary_screen()
     end
     return list[1]
 end
-local mon = pick_primary_screen()
+-- Se resuelve en rebuild() segun config.bar.monitor.
+local mon = nil
 
 local ewmh_mod = require("lib.ewmh")
 local xcb      = require("lib.xcb")
+
+-- Resuelve el monitor segun config.bar.monitor:
+--   "cursor"   -> monitor bajo el mouse (default)
+--   "primary"  -> VGA-1 si existe, si no el primero
+--   "focused"  -> monitor con el escritorio activo (via bspc)
+--   "<name>"   -> monitor con ese nombre (ej "VGA-1", "LVDS-1")
+local function resolve_monitor(name)
+    name = name or "cursor"
+    if name == "primary" then
+        return pick_primary_screen()
+    elseif name == "cursor" then
+        local cx, cy = xcb.query_pointer(srv.conn)
+        if cx then
+            local m = screens.at(cx, cy)
+            if m then return m end
+        end
+        return pick_primary_screen()
+    elseif name == "focused" then
+        local h = io.popen("bspc query -M --names -d 2>/dev/null")
+        if h then
+            local mname = h:read("*l")
+            h:close()
+            if mname and mname ~= "" then
+                for _, s in ipairs(screens.list()) do
+                    if s.name == mname then return s end
+                end
+            end
+        end
+        return pick_primary_screen()
+    else
+        for _, s in ipairs(screens.list()) do
+            if s.name == name then return s end
+        end
+        log.warn("bar", "monitor desconocido en config: %s", tostring(name))
+        return pick_primary_screen()
+    end
+end
+
 
 local bar_win, bar_data, bar_starts, bar_stops
 local stopping = false
@@ -175,6 +214,9 @@ local function write_dock_geometry(geo)
 end
 
 local function follow_pointer()
+    local cfg = config.get()
+    if not cfg.bar.follow_cursor then return end
+
     if not bar_win or bar_win.destroyed then return end
     if not current_mon or not bar_spec then return end
 
@@ -286,6 +328,8 @@ local function rebuild()
     end
     stop_widgets()
 
+    mon = resolve_monitor(cfg.bar.monitor)
+
     local style_mod = styles_mod.get(SPEC.style or "arrow")
     local eff_spec  = effective_spec(SPEC, style_mod)
     local geo = geometry.compute(eff_spec, mon)
@@ -345,10 +389,12 @@ local function rebuild()
         if _smart_active then apply_visibility() end
     end)
 
-    if _follow_timer then _follow_timer:cancel() end
-    _follow_timer = srv:add_timer(FOLLOW_MS, function()
-        follow_pointer()
-    end)
+    if _follow_timer then _follow_timer:cancel(); _follow_timer = nil end
+    if cfg.bar.follow_cursor then
+        _follow_timer = srv:add_timer(FOLLOW_MS, function()
+            follow_pointer()
+        end)
+    end
 
     for _, start in ipairs(bar_starts) do
         local ok, err = pcall(start)
