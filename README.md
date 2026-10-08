@@ -49,7 +49,7 @@ return {
 Arrancar el daemon:
 
 ```sh
-/opt/lane-bar/run /opt/lane-bar/app.lua
+/opt/lane-bar/run /opt/lane-bar/lane-bar.lua
 ```
 
 Control mediante trigger:

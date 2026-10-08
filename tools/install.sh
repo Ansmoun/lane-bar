@@ -17,7 +17,7 @@ fi
 SRC="${REAL_HOME}/proyectos/lane-bar"
 DST="/opt/lane-bar"
 if [ "$(id -u)" -ne 0 ]; then echo "necesita root"; exit 1; fi
-if [ ! -f "$SRC/app.lua" ]; then echo "falta $SRC/app.lua"; exit 1; fi
+if [ ! -f "$SRC/lane-bar.lua" ]; then echo "falta $SRC/lane-bar.lua"; exit 1; fi
 if [ ! -d "/opt/lanetk/src/lib" ]; then echo "falta LaneTK"; exit 1; fi
 if [ -d "$DST" ] && [ "$AUTO_YES" -eq 0 ]; then
     printf "==> Reemplazar $DST? [y/N] "

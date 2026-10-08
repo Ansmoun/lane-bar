@@ -508,7 +508,17 @@ local function rebuild()
 end
 
 config.watch(srv, function()
-    log.info("bar", "config cambio, rebuild")
+    -- Recargar el tema ANTES de rebuild. Sin esto, SPEC queda con
+    -- el tema cargado al arrancar el daemon: si el usuario cambia
+    -- config.bar.theme en caliente, rebuild() usa el SPEC viejo.
+    log.info("bar", "config cambio, recargando tema")
+    local ok, new_spec, name = pcall(bar_themes.load)
+    if ok and type(new_spec) == "table" then
+        SPEC = new_spec
+        log.info("bar", "tema recargado: %s", tostring(name))
+    else
+        log.warn("bar", "recarga de tema fallo: %s", tostring(new_spec))
+    end
     rebuild()
 end)
 

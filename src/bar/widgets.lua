@@ -5,6 +5,7 @@ local D     = require("lib.data")
 local Area  = require("lib.area")
 local cairo = require("lib.cairo")
 local svg   = require("lib.svg")
+local pango = require("lib.pango")
 
 local M = {}
 
@@ -409,6 +410,368 @@ M.start = function(T, srv, ctx)
         stop = function()
             if timer then timer:cancel(); timer = nil end
             if ctx and ctx.sess then ctx.sess:clear("start") end
+        end,
+    }
+end
+
+
+-- ─── Tasklist ───────────────────────────────────────────────────
+--
+-- Visor de ventanas activas del monitor donde vive la barra. Cada
+-- ventana es un icono clickeable.
+--
+--   [🦊] [⌨] [📁]        ^activa     ^inactiva  ^inactiva
+--
+-- Click izquierdo: enfoca la ventana (y su escritorio si aplica).
+-- Click derecho: cierra la ventana.
+--
+-- Datos: bspc query para IDs, xprop para WM_CLASS + _NET_WM_NAME.
+-- Poll cada 1000ms.
+
+-- Consulta bspc: devuelve array de { id (hex string), id_dec (num) }.
+local function bspc_leaves(monitor)
+    local out = {}
+    if not monitor or monitor == "" then return out end
+    local cmd = string.format(
+        "bspc query -N -m %s -n '.leaf' 2>/dev/null", monitor)
+    local h = io.popen(cmd)
+    if not h then return out end
+    for line in h:lines() do
+        line = line:match("^%s*(.-)%s*$")
+        if line ~= "" then
+            local n = tonumber(line)
+            if n then
+                out[#out + 1] = { id = line, id_dec = n }
+            end
+        end
+    end
+    h:close()
+    return out
+end
+
+-- xprop batch: WM_CLASS + _NET_WM_NAME de N ventanas en un solo
+-- proceso. Devuelve { [id_hex] = { class = "...", name = "..." } }.
+local function xprop_batch(ids)
+    local out = {}
+    if #ids == 0 then return out end
+    local args = {}
+    for _, w in ipairs(ids) do
+        args[#args + 1] = "-id " .. w.id
+    end
+    local cmd = "xprop " .. table.concat(args, " ")
+                .. " WM_CLASS _NET_WM_NAME 2>/dev/null"
+    local h = io.popen(cmd)
+    if not h then return out end
+    local cur_id = nil
+    for line in h:lines() do
+        -- xprop agrupa por ventana y separa con línea en blanco.
+        if line == "" then
+            cur_id = nil
+        else
+            -- Detectar el inicio de un bloque por la primera línea
+            -- que contiene "WM_CLASS" o "_NET_WM_NAME".
+            local cls = line:match('WM_CLASS%s*%(STRING%)%s*=%s*"([^"]+)"%s*,%s*"([^"]+)"')
+            if cls then
+                -- Guardamos con la ventana actual (por orden).
+                -- xprop no incluye el id en cada línea, así que
+                -- reconstruimos por orden de aparición.
+                out[#out + 1] = { class = cls }
+            end
+            local nm = line:match('_NET_WM_NAME%s*%(UTF8_STRING%)%s*=%s*"([^"]*)"')
+            if nm and #out > 0 then
+                out[#out].name = nm
+            end
+        end
+    end
+    h:close()
+    -- Mapear por índice al id original.
+    local by_id = {}
+    for i, w in ipairs(ids) do
+        by_id[w.id] = out[i] or { class = nil, name = nil }
+    end
+    return by_id
+end
+
+-- Sinónimos de WM_CLASS → nombre de icono estándar. La mayoría de
+-- apps ya emiten un WM_CLASS que find_icon resuelve, pero hay
+-- excepciones donde el binario se llama distinto al icono.
+local WMCLASS_ICON_ALIAS = {
+    ["pcmanfm"]        = "system-file-manager",
+    ["thunar"]         = "Thunar",
+    ["nautilus"]       = "org.gnome.Nautilus",
+    ["nemo"]           = "folder",
+    ["caja"]           = "folder",
+    ["dolphin"]        = "system-file-manager",
+    ["st"]             = "utilities-terminal",
+    ["xterm"]          = "utilities-terminal",
+    ["alacritty"]      = "utilities-terminal",
+    ["kitty"]          = "utilities-terminal",
+    ["lxappearance"]   = "preferences-desktop-theme",
+    ["pavucontrol"]    = "multimedia-volume-control",
+    ["nm-connection-editor"] = "network-wireless",
+    ["blueman-manager"] = "bluetooth",
+    ["gimp"]           = "gimp",
+    ["inkscape"]       = "inkscape",
+    ["code"]           = "code",
+    ["code-oss"]       = "code-oss",
+    ["vlc"]            = "vlc",
+    ["mpv"]            = "mpv",
+}
+
+-- Mapeo de _NET_WM_NAME (para apps LANE que todas emiten lanetk
+-- como WM_CLASS) a iconos propios del proyecto.
+local LANE_NAME_TO_ICON = {
+    ["Laneter"]           = "tab-book",
+    ["LANE — Archivos"]   = "files/folder",
+    ["LANE — Config"]     = "tab-settings",
+    ["LANE — Discos"]     = "tab-disk",
+    ["LANE — Procesos"]   = "tab-list",
+    ["LANE — Bateria"]    = "tab-battery",
+    ["LANE — Logout"]     = "logout/logout",
+    ["LANE — Inicio"]     = "tab-home",
+    ["LANE — Buscar"]     = "tab-search",
+    ["LANE — Launcher"]   = "tab-dashboard",
+    ["LANE — Red"]        = "tab-wifi",
+    ["LANE — Screenshot"] = "screenshot/area",
+    ["LANE — Sysmon"]     = "tab-chip",
+}
+
+M.tasklist = function(T, srv, ctx)
+    local ICON_SIZE   = 22
+    local PAD_X       = 6
+    local GAP         = 4
+    local ITEM_W      = ICON_SIZE + PAD_X * 2
+    local ITEM_H      = ICON_SIZE + 4
+    local POLL_MS     = 500
+
+    local D        = require("lib.data.launcher")
+    local Icons    = require("lib.icons")
+    local svg      = require("lib.svg")
+
+    local TaskList = setmetatable({}, { __index = Area })
+    TaskList.__index = TaskList
+
+    function TaskList.new(opts)
+        local self = setmetatable(Area.new(opts), TaskList)
+        self._hover_visual = true
+        self._pressed_visual = true
+        self.theme = T
+        self.windows = {}
+        self.hover_idx = -1
+        self.min_h, self.max_h = ITEM_H, ITEM_H
+        self.min_w = 20
+        self.max_w = 10000
+        return self
+    end
+
+    function TaskList:set_windows(list)
+        self.windows = list
+        self:damage()
+    end
+
+    function TaskList:draw(cr)
+        local T2 = self.theme
+        local accent = T2.accent_rgb or { 0.9, 0.7, 0.4 }
+        local sep    = T2.separator_rgb or { 0.3, 0.3, 0.3 }
+        local fg     = T2.fg_rgb or { 0.9, 0.9, 0.9 }
+        local y = self.y0
+        local h = self:getHeight()
+        for i, w in ipairs(self.windows) do
+            local x = self.x0 + (i - 1) * (ITEM_W + GAP)
+            local active = w.active
+            local hover  = (i == self.hover_idx)
+
+            -- Barra inferior de "activo" (estilo Win10).
+            if active then
+                cairo.set_rgba(cr, accent[1], accent[2], accent[3], 0.25)
+                cairo.rounded_rect(cr, x + 1, y + 2, ITEM_W - 2, h - 4, 4)
+                cairo.fill(cr)
+                cairo.set_rgb(cr, accent[1], accent[2], accent[3])
+                cairo.rounded_rect(cr, x + 4, y + h - 3, ITEM_W - 8, 2, 1)
+                cairo.fill(cr)
+            elseif hover then
+                cairo.set_rgba(cr, sep[1], sep[2], sep[3], 0.35)
+                cairo.rounded_rect(cr, x + 1, y + 2, ITEM_W - 2, h - 4, 4)
+                cairo.fill(cr)
+            end
+
+            if w.surface then
+                cairo.draw_surface(cr, w.surface,
+                    x + PAD_X, y + (h - ICON_SIZE) / 2,
+                    ICON_SIZE, ICON_SIZE)
+            else
+                -- Fallback: letra inicial de name o class.
+                local label = (w.name or w.class or "?")
+                -- Si name tiene "—" usamos lo que sigue (más limpio).
+                local after = label:match("—%s*(.+)$")
+                if after then label = after end
+                local letter = label:sub(1, 1):upper()
+                local iw, ih = pango.measure(letter, "DejaVu Sans Bold 12")
+                pango.draw_text(cr,
+                    x + (ITEM_W - iw) / 2, y + (h - ih) / 2,
+                    letter, "DejaVu Sans Bold 12",
+                    { r = fg[1], g = fg[2], b = fg[3] })
+            end
+        end
+    end
+
+    function TaskList:on_mouse_move(mx, my)
+        local idx = -1
+        for i, _ in ipairs(self.windows) do
+            local x0 = (i - 1) * (ITEM_W + GAP)
+            if mx >= x0 and mx < x0 + ITEM_W then idx = i; break end
+        end
+        if idx ~= self.hover_idx then
+            self.hover_idx = idx
+            self:damage()
+        end
+    end
+
+    function TaskList:on_mouse_press(mx, my, button)
+        for i, w in ipairs(self.windows) do
+            local x0 = (i - 1) * (ITEM_W + GAP)
+            if mx >= x0 and mx < x0 + ITEM_W then
+                if button == 1 then
+                    -- Enfocar. Si la ventana está en otro desktop, bspc
+                    -- la trae automáticamente con -f.
+                    os.execute(string.format(
+                        "bspc node %s -f >/dev/null 2>&1 &", w.id))
+                elseif button == 3 then
+                    os.execute(string.format(
+                        "bspc node %s -c >/dev/null 2>&1 &", w.id))
+                end
+                return
+            end
+        end
+    end
+
+    local widget = TaskList.new {}
+
+    -- Cache: "key" -> surface | false
+    local icon_cache = {}
+
+    -- Cascada de resolución de icono:
+    --   1. name en LANE_NAME_TO_ICON → Icons.surface (iconos del proyecto)
+    --   2. WMCLASS_ICON_ALIAS[class] → D.find_icon
+    --   3. D.find_icon(class)
+    --   4. D.find_icon(name)
+    --   5. Icons.surface(class) o Icons.surface(name)
+    --   6. nil → fallback a letra inicial
+    local function resolve_icon(w)
+        local cache_key = (w.class or "") .. "|" .. (w.name or "")
+        local cached = icon_cache[cache_key]
+        if cached ~= nil then return cached or nil end
+
+        local surf = nil
+
+        -- Paso 1: name en tabla LANE.
+        if w.name and LANE_NAME_TO_ICON[w.name] then
+            surf = Icons.surface(LANE_NAME_TO_ICON[w.name], ICON_SIZE)
+        end
+
+        -- Paso 2-3: class (con y sin sinónimo).
+        if not surf and w.class and w.class ~= "" then
+            local cls = w.class:lower()
+            local alias = WMCLASS_ICON_ALIAS[cls]
+            local path = D.find_icon(alias or cls)
+            if path then
+                if path:match("%.svg$") then
+                    surf = svg.load(path, ICON_SIZE, ICON_SIZE)
+                else
+                    surf = cairo.load_png_cached(path)
+                end
+            end
+        end
+
+        -- Paso 4: name completo.
+        if not surf and w.name and w.name ~= "" then
+            local path = D.find_icon(w.name:lower())
+            if path then
+                if path:match("%.svg$") then
+                    surf = svg.load(path, ICON_SIZE, ICON_SIZE)
+                else
+                    surf = cairo.load_png_cached(path)
+                end
+            end
+        end
+
+        -- Paso 5: Icons del proyecto (fallback).
+        if not surf then
+            surf = Icons.surface(w.class or "", ICON_SIZE)
+            if not surf and w.name then
+                surf = Icons.surface(w.name, ICON_SIZE)
+            end
+        end
+
+        icon_cache[cache_key] = surf or false
+        return surf
+    end
+
+    local timer
+    local function refresh()
+        if not ctx or not ctx.sess then return end
+        local dock = ctx.sess:get("dock")
+        local mon = dock and dock.monitor
+        if not mon then return end
+
+        local leaves = bspc_leaves(mon)
+        local ids = {}
+        for _, w in ipairs(leaves) do ids[#ids + 1] = { id = w.id } end
+        local meta = xprop_batch(ids)
+
+        -- Ventana activa: la que tiene el foco del WM en este monitor.
+        local active_id = nil
+        do
+            local h = io.popen(string.format(
+                "bspc query -N -m %s -n '.active' 2>/dev/null", mon))
+            if h then
+                active_id = h:read("*l")
+                h:close()
+            end
+            if not active_id or active_id == "" then
+                h = io.popen(
+                    "bspc query -N -n 'focused' 2>/dev/null")
+                if h then
+                    active_id = h:read("*l")
+                    h:close()
+                end
+            end
+        end
+
+        local out = {}
+        for _, w in ipairs(leaves) do
+            local m = meta[w.id] or {}
+            local class = m.class and (m.class[2] or m.class[1])
+            local item = {
+                id = w.id,
+                class = class,
+                name = m.name,
+                active = (w.id == active_id),
+            }
+            item.surface = resolve_icon(item)
+            out[#out + 1] = item
+        end
+        widget:set_windows(out)
+    end
+
+    return {
+        widget = widget,
+        start = function()
+            local ok, err = pcall(refresh)
+            if not ok then
+                require("lib.log").warn("bar",
+                    "tasklist refresh (start) fallo: %s", tostring(err))
+            end
+            timer = srv:add_timer(POLL_MS, function()
+                local ok2, err2 = pcall(refresh)
+                if not ok2 then
+                    require("lib.log").warn("bar",
+                        "tasklist refresh fallo: %s", tostring(err2))
+                end
+            end)
+        end,
+        stop = function()
+            if timer then timer:cancel(); timer = nil end
         end,
     }
 end
