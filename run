@@ -13,5 +13,5 @@ else
     echo "run: no se encuentra LaneTK" >&2
     exit 1
 fi
-export LUA_PATH="$APP/?.lua;$APP/src/?.lua;$APP/src/?/init.lua;$TK/?.lua;$TK/src/?.lua;$TK/src/?/init.lua;;"
+export LUA_PATH="$APP/?.lua;$APP/?/init.lua;$APP/src/?.lua;$APP/src/?/init.lua;$TK/?.lua;$TK/src/?.lua;$TK/src/?/init.lua;;"
 exec luajit "$@"

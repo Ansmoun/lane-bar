@@ -10,6 +10,7 @@ local geometry = require("bar.geometry")
 local engine   = require("bar.engine")
 local widgets  = require("bar.widgets")
 local styles_mod = require("bar.styles")
+local bar_themes = require("themes")
 local xanim      = require("lib.xshape_anim")
 local session    = require("lib.session")   -- [SESSION]
 local config   = require("lib.config")
@@ -26,7 +27,11 @@ local sess = session.new(srv, "lane-bar")
 local T = theme.load()
 log.info("bar", "paleta: %s", T.path)
 
-local SPEC = dofile(SPEC_PATH)
+-- Carga del tema: reemplaza el dofile("layout.lua") por el loader
+-- del sistema de temas. Si config.bar.theme no existe o falla, cae
+-- al tema "dock" (que reproduce el layout previo).
+local SPEC, spec_theme_name = bar_themes.load()
+log.info("bar", "tema: %s", spec_theme_name)
 if type(SPEC) ~= "table" then
     log.error("bar", "layout.lua no devolvio tabla")
     os.exit(1)
@@ -335,6 +340,9 @@ local function rebuild()
     mon = resolve_monitor(cfg.bar.monitor)
 
     local style_mod = styles_mod.get(SPEC.style or "arrow")
+    -- El tema puede sobreescribir el draw_bg del estilo. Útil para
+    -- temas que quieren un fondo distinto sin duplicar el estilo.
+    local theme_draw_bg = SPEC.draw_bg
     local eff_spec  = effective_spec(SPEC, style_mod)
     local geo = geometry.compute(eff_spec, mon)
     local bar = engine.build(T, eff_spec, widgets, srv)
@@ -353,8 +361,9 @@ local function rebuild()
         strut = build_strut(geo),
         background_pixel = bg_pixel,
         on_draw = function(cr, w, h)
-            if style_mod.draw_bg then
-                style_mod.draw_bg(cr, w, h, T)
+            local draw_bg_fn = theme_draw_bg or style_mod.draw_bg
+            if draw_bg_fn then
+                draw_bg_fn(cr, w, h, T)
             else
                 cairo.set_rgb(cr, T.bg_rgb[1], T.bg_rgb[2], T.bg_rgb[3])
                 cairo.paint(cr)
