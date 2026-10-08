@@ -12,6 +12,7 @@ local widgets  = require("bar.widgets")
 local styles_mod = require("bar.styles")
 local xanim      = require("lib.xshape_anim")
 local session    = require("lib.session")   -- [SESSION]
+local config   = require("lib.config")
 
 local SPEC_PATH = "layout.lua"
 
@@ -249,7 +250,36 @@ local function effective_spec(spec, style_mod)
     return out
 end
 
+local function teardown_bar()
+    if bar_win and not bar_win.destroyed then
+        bar_win:close("disabled")
+        bar_win = nil
+    end
+    stop_widgets()
+    if _smart_timer then _smart_timer:cancel(); _smart_timer = nil end
+    if _follow_timer then _follow_timer:cancel(); _follow_timer = nil end
+    bar_handle = nil
+    bar_data   = nil
+    bar_spec   = nil
+    bar_geo    = nil
+end
+
+local function publish_dock_absent()
+    sess:set("dock", { present = false })
+end
+
 local function rebuild()
+    local cfg = config.get()
+
+    if not cfg.bar.enabled then
+        teardown_bar()
+        publish_dock_absent()
+        _last_published = nil
+        _smart_active = false
+        log.info("bar", "deshabilitada por config")
+        return
+    end
+
     if bar_win and not bar_win.destroyed then
         bar_win:close("rebuild")
         bar_win = nil
@@ -333,6 +363,11 @@ local function rebuild()
         geo.position, geo.w, geo.h, geo.x, geo.y,
         bar.sep_style, #bar_starts)
 end
+
+config.watch(srv, function()
+    log.info("bar", "config cambio, rebuild")
+    rebuild()
+end)
 
 theme.watch(rebuild)
 reload.install(srv, function()
