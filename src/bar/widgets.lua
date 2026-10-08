@@ -365,6 +365,32 @@ M.prompt = function(T, srv)
     return { widget = grp, set_fg = fg_apply(ico, txt) }
 end
 
+
+-- M.start: botón "inicio". Icono clickeable que dispara el toggle
+-- del launcher via su trigger file. Usado por los temas kde/win10.
+--
+-- opts:
+--   size       : tamaño del icono (default 22)
+--   icon       : nombre del icono (default "start")
+--   command    : trigger file del launcher (default "/tmp/lane-launcher.cmd")
+M.start = function(T, srv)
+    local size = 22
+    local ico_name = "start"
+    local trigger  = "/tmp/lane-launcher.cmd"
+    local hex = T.fg_normal or "#ebdbb2"
+    local rgb = { G.hex_to_rgba(hex) }
+    local ico = make_icon(ico_name, rgb, size)
+
+    -- W.Icon dispara _on_click en on_mouse_press. NO usamos
+    -- opts.on_click: el Window lo duplica en ButtonRelease.
+    ico._on_click = function()
+        local f = io.open(trigger, "w")
+        if f then f:write("toggle\n"); f:close() end
+    end
+
+    return { widget = ico }
+end
+
 function M.register(name, fn) M[name] = fn end
 
 return M

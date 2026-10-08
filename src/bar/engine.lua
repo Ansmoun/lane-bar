@@ -95,9 +95,11 @@ local function build_side(theme, list, registry, groups, opts, srv)
 
                     -- fg: contraste segun fondo del widget, o el
                     -- propio color de telemetria si el estilo lo pide.
-                    local fg_mode = style_mod.fg_mode or "contrast"
+                    local fg_mode = opts.fg_mode or style_mod.fg_mode or "contrast"
                     local widget_fg
-                    if fg_mode == "self" and wrapper.color then
+                    if fg_mode == "flat" then
+                        widget_fg = T.fg_normal or "#FEFEFE"
+                    elseif fg_mode == "self" and wrapper.color then
                         widget_fg = wrapper.color
                     elseif style_name == "underline" then
                         widget_fg = T.fg_normal or "#FEFEFE"
@@ -152,6 +154,7 @@ function M.build(theme, spec, registry, srv)
     for k, v in pairs(right_groups)  do groups[k] = v end
 
     local side_opts = {
+        fg_mode = spec.fg_mode,
         style = sep_style,
         gap = gap,
         bar_h = bar_h,

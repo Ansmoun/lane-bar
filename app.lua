@@ -11,6 +11,31 @@ local engine   = require("bar.engine")
 local widgets  = require("bar.widgets")
 local styles_mod = require("bar.styles")
 local bar_themes = require("themes")
+local Icons     = require("lib.icons")
+
+-- Encuentra la raíz de LANE (donde vive icons-src/). Orden:
+--   $LANE_ROOT  ->  /opt/lane  ->  ~/proyectos/lane
+-- Necesario para que Icons resuelva iconos propios de LANE (como
+-- "start") que no viven en el toolkit.
+local function resolve_lane_root()
+    local env = os.getenv("LANE_ROOT")
+    if env and env ~= "" then
+        local h = io.popen("test -d '" .. env .. "/icons-src' && echo yes")
+        if h then
+            local ok = h:read("*l"); h:close()
+            if ok == "yes" then return env end
+        end
+    end
+    local home = os.getenv("HOME") or ""
+    for _, p in ipairs({ "/opt/lane", home .. "/proyectos/lane" }) do
+        local h = io.popen("test -d '" .. p .. "/icons-src' && echo yes")
+        if h then
+            local ok = h:read("*l"); h:close()
+            if ok == "yes" then return p end
+        end
+    end
+    return nil
+end
 local xanim      = require("lib.xshape_anim")
 local session    = require("lib.session")   -- [SESSION]
 local config   = require("lib.config")
@@ -25,6 +50,16 @@ anim.init(srv, { fps = 30 })
 local sess = session.new(srv, "lane-bar")
 
 local T = theme.load()
+
+-- Apuntar Icons a la raíz de LANE para iconos propios (start, etc).
+do
+    local lane_root = resolve_lane_root()
+    if lane_root then
+        Icons.set_root(lane_root)
+    else
+        log.warn("bar", "no se encontró icons-src de LANE")
+    end
+end
 log.info("bar", "paleta: %s", T.path)
 
 -- Carga del tema: reemplaza el dofile("layout.lua") por el loader
