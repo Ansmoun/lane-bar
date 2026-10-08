@@ -11,11 +11,16 @@ local engine   = require("bar.engine")
 local widgets  = require("bar.widgets")
 local styles_mod = require("bar.styles")
 local xanim      = require("lib.xshape_anim")
+local session    = require("lib.session")   -- [SESSION]
 
 local SPEC_PATH = "layout.lua"
 
 local srv = Server.new { exit_on_empty = false }
 anim.init(srv, { fps = 30 })
+
+-- [SESSION] Bus de estado compartido con otros satelites LANE.
+-- Publica "dock" (geometria) y consulta "launcher" (open/closed).
+local sess = session.new(srv, "lane-bar")
 
 local T = theme.load()
 log.info("bar", "paleta: %s", T.path)
@@ -94,6 +99,14 @@ local function has_windows_on_dock_monitor()
     return any
 end
 
+-- [SESSION] Consulta session.launcher.open. Retrocompat: el archivo
+-- /tmp/lane-launcher-open sigue vigente hasta que launcher Fase 1c
+-- lo deprecie; ambos canales coexisten.
+local function launcher_open_by_session()
+    local l = sess:get("launcher")
+    return l and l.open == true
+end
+
 local function wants_visible()
     if not _smart_active then return true end
     -- El launcher escribe este archivo mientras esta abierto. Se
@@ -101,6 +114,8 @@ local function wants_visible()
     -- y el reveal se sienta como si saliera del dock.
     local f = io.open("/tmp/lane-launcher-open", "r")
     if f then f:close() return true end
+    -- [SESSION] Canal nuevo.
+    if launcher_open_by_session() then return true end
     local km = xcb.query_keymap(srv.conn)
     if km and xcb.key_pressed(km, super_code) then return true end
     return not has_windows_on_dock_monitor()
@@ -126,13 +141,36 @@ local function apply_visibility()
     end
 end
 
+-- [SESSION] Firma local de la ultima geometria publicada, para
+-- evitar writes redundantes al JSON (que bumpearian _gen y harian
+-- despertar de mas al poll de 200ms de los otros clientes).
+local _last_published = nil
+
 local function write_dock_geometry(geo)
+    local mon_name = current_mon and current_mon.name or ""
+    local key = string.format("%d:%d:%d:%d:%s:%s",
+        geo.x, geo.y, geo.w, geo.h, mon_name,
+        geo.position or "")
+    if _last_published == key then return end
+    _last_published = key
+
+    -- Retrocompat: launcher (y cualquier consumidor externo) sigue
+    -- leyendo este archivo mientras dure la transicion.
     local gf = io.open("/tmp/lane-dock-geometry", "w")
     if gf then
         gf:write(string.format("%d %d %d %d\n",
             geo.x, geo.y, geo.w, geo.h))
         gf:close()
     end
+
+    -- [SESSION] Canal nuevo.
+    sess:set("dock", {
+        present = true,
+        x = geo.x, y = geo.y,
+        w = geo.w, h = geo.h,
+        monitor = mon_name ~= "" and mon_name or nil,
+        edge    = geo.position,
+    })
 end
 
 local function follow_pointer()
@@ -326,4 +364,7 @@ srv:run()
 
 stopping = true
 stop_widgets()
+-- [SESSION] Despublicar y desregistrar el cliente.
+sess:clear("dock")
+sess:close()
 log.info("bar", "adios")
