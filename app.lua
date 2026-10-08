@@ -143,6 +143,10 @@ end
 -- /tmp/lane-launcher-open sigue vigente hasta que launcher Fase 1c
 -- lo deprecie; ambos canales coexisten.
 local function launcher_open_by_session()
+    local cfg = config.get()
+    if cfg.coupling and cfg.coupling.launcher_open_forces_bar == false then
+        return false
+    end
     local l = sess:get("launcher")
     return l and l.open == true
 end
