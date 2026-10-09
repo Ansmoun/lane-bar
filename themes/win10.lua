@@ -39,8 +39,6 @@ return {
         "tasklist",
     },
     right = {
-        { toggle_group = "telemetry", default = "visible",
-          widgets = { "net", "mem", "cpu" } },
-        "bright", "vol", "bat", "clock",
+        "vol", "bright", "bat", "clock",
     },
 }

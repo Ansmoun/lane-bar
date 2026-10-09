@@ -43,7 +43,7 @@ local config   = require("lib.config")
 local SPEC_PATH = "layout.lua"
 
 local srv = Server.new { exit_on_empty = false }
-anim.init(srv, { fps = 30 })
+anim.init(srv, { fps = 60 })
 
 -- [SESSION] Bus de estado compartido con otros satelites LANE.
 -- Publica "dock" (geometria) y consulta "launcher" (open/closed).

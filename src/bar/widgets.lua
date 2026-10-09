@@ -190,24 +190,44 @@ local function simple(icon, key, tick_ms, sampler, formatter)
 end
 
 M.clock = function(T, srv)
-    local hex = T.accent or "#d79921"
+    local hex = T.fg_normal or "#ebdbb2"
     local rgb = { G.hex_to_rgba(hex) }
-    local txt = W.Text.new {
+    local muted_hex = T.muted or "#928374"
+    local m_rgb = { G.hex_to_rgba(muted_hex) }
+
+    -- Dos líneas: hora arriba (bold), fecha abajo (muted).
+    local time_txt = W.Text.new {
         text = os.date("%H:%M"),
-        font = "DejaVu Sans Bold 10",
+        font = "DejaVu Sans Bold 11",
         r = rgb[1], g = rgb[2], b = rgb[3],
         align = "center", valign = "center",
     }
+    local date_txt = W.Text.new {
+        text = os.date("%d/%m/%Y"),
+        font = "DejaVu Sans 9",
+        r = m_rgb[1], g = m_rgb[2], b = m_rgb[3],
+        align = "center", valign = "center",
+    }
+    local grp = W.Group.new {
+        orientation = "vertical",
+        spacing = 0,
+        padding = 0,
+        children = {
+            { widget = time_txt, weight = 0 },
+            { widget = date_txt, weight = 0 },
+        },
+    }
     local timer
     return {
-        widget = txt,
+        widget = grp,
         set_fg = function(h)
             local r, g, b = G.hex_to_rgba(h)
-            txt:set_color(r, g, b)
+            time_txt:set_color(r, g, b)
         end,
         start = function()
-            timer = srv:add_timer(5000, function()
-                txt:set_text(os.date("%H:%M"))
+            timer = srv:add_timer(10000, function()
+                time_txt:set_text(os.date("%H:%M"))
+                date_txt:set_text(os.date("%d/%m/%Y"))
             end)
         end,
         stop = function()
@@ -519,21 +539,35 @@ M.tasklist = function(T, srv, ctx)
     local PAD_X       = 6
     local GAP         = 4
     local ITEM_W      = ICON_SIZE + PAD_X * 2
+    local LABEL_GAP   = 6
+    local LABEL_MAX   = 140
     local ITEM_H      = ICON_SIZE + 4
+    local LABEL_FONT  = "DejaVu Sans 10"
+    local EXPAND_MS   = 200
 
     local D     = require("lib.data.launcher")
     local Icons = require("lib.icons")
     local svg   = require("lib.svg")
     local log   = require("lib.log")
+    local anim  = require("lib.anim")
 
     local ewmh = ctx and ctx.ewmh
     if not ewmh then
-        log.warn("bar", "tasklist: sin ewmh en ctx, no se puede inicializar")
-        return {
-            widget = Area.new({}),
-            start  = function() end,
-            stop   = function() end,
-        }
+        log.warn("bar", "tasklist: sin ewmh en ctx")
+        return { widget = Area.new({}), start = function() end, stop = function() end }
+    end
+
+    local function truncate(s, max_px, font)
+        if not s or s == "" then return "" end
+        if pango.measure(s, font) <= max_px then return s end
+        local ell = "..."
+        local ew  = pango.measure(ell, font)
+        if ew > max_px then return "" end
+        for i = #s, 1, -1 do
+            local sub = s:sub(1, i) .. ell
+            if pango.measure(sub, font) <= max_px then return sub end
+        end
+        return ell
     end
 
     local TaskList = setmetatable({}, { __index = Area })
@@ -552,17 +586,81 @@ M.tasklist = function(T, srv, ctx)
         return self
     end
 
-    function TaskList:set_windows(list)
-        local count_changed = (#list ~= #self.windows)
-        self.windows = list
-        -- Si cambió la cantidad de items, el ancho que pedimos
-        -- cambió también: hay que pedir relayout del árbol completo
-        -- para que el Group nos reasigne un rect más ancho/angosto.
-        if count_changed then
-            self:invalidate_layout()
-        else
-            self:damage()
+    -- Ancho actual de un item (interpolado por expand_t).
+    function TaskList:_item_width(w)
+        local t = w.expand_t or 0
+        if t < 0.001 then return ITEM_W end
+        local name = truncate(w.name or w.class or "?",
+                              LABEL_MAX, LABEL_FONT)
+        local lw = pango.measure(name, LABEL_FONT)
+        local full = ITEM_W + LABEL_GAP + lw
+        return ITEM_W + (full - ITEM_W) * t
+    end
+
+    -- Ancho total y posiciones de cada item, centrados en el rect.
+    function TaskList:_layout()
+        local total = 0
+        local widths = {}
+        for i, w in ipairs(self.windows) do
+            widths[i] = self:_item_width(w)
+            total = total + widths[i]
+            if i > 1 then total = total + GAP end
         end
+        local x = self.x0 + (self:getWidth() - total) / 2
+        local rects = {}
+        for i, w in ipairs(self.windows) do
+            rects[i] = { x = x, w = widths[i], item = w }
+            x = x + widths[i] + GAP
+        end
+        return rects, total
+    end
+
+    -- Anima el expand_t de cada item hacia su target (1 si es el
+    -- activo, 0 si no). El viejo activo se colapsa, el nuevo expande.
+    function TaskList:_animate_transitions()
+        -- Si anim no está listo, aplicar directo.
+        if not anim.is_ready() then
+            for _, w in ipairs(self.windows) do
+                w.expand_t = w.active and 1 or 0
+            end
+            self:damage()
+            return
+        end
+        for _, w in ipairs(self.windows) do
+            local target = w.active and 1 or 0
+            local from = w.expand_t or 0
+            if math.abs(target - from) < 0.001 then
+                w.expand_t = target
+            else
+                if w._handle then w._handle:cancel(); w._handle = nil end
+                w._handle = anim.tween_custom(self,
+                    function(eased)
+                        w.expand_t = from + (target - from) * eased
+                        self:damage()
+                    end,
+                    EXPAND_MS, anim.EASE.out_cubic,
+                    function()
+                        w.expand_t = target
+                        w._handle = nil
+                        self:invalidate_layout()
+                    end)
+            end
+        end
+    end
+
+    function TaskList:set_windows(list)
+        -- Preservar expand_t de items que siguen vivos.
+        local prev = {}
+        for _, w in ipairs(self.windows) do
+            prev[w.id] = w.expand_t or 0
+        end
+        for _, w in ipairs(list) do
+            if prev[w.id] then w.expand_t = prev[w.id]
+            else w.expand_t = 0 end
+        end
+        self.windows = list
+        self:_animate_transitions()
+        self:invalidate_layout()
     end
 
     function TaskList:draw(cr)
@@ -572,55 +670,93 @@ M.tasklist = function(T, srv, ctx)
         local fg     = T2.fg_rgb or { 0.9, 0.9, 0.9 }
         local y = self.y0
         local h = self:getHeight()
-        for i, w in ipairs(self.windows) do
-            local x = self.x0 + (i - 1) * (ITEM_W + GAP)
-            local active = w.active
-            local hover  = (i == self.hover_idx)
-            if active then
-                cairo.set_rgba(cr, accent[1], accent[2], accent[3], 0.25)
-                cairo.rounded_rect(cr, x + 1, y + 2, ITEM_W - 2, h - 4, 4)
+        local rects = self:_layout()
+        for i, r in ipairs(rects) do
+            local w   = r.item
+            local x   = r.x
+            local iw  = r.w
+            local t   = w.expand_t or 0
+            local act = w.active
+            local hov = (i == self.hover_idx)
+
+            if act then
+                -- Fondo del activo (fade con t).
+                cairo.set_rgba(cr, accent[1], accent[2], accent[3],
+                               0.12 + 0.10 * t)
+                cairo.rounded_rect(cr, x + 1, y + 2, iw - 2, h - 4, 3)
                 cairo.fill(cr)
+                -- Borde inferior accent.
                 cairo.set_rgb(cr, accent[1], accent[2], accent[3])
-                cairo.rounded_rect(cr, x + 4, y + h - 3, ITEM_W - 8, 2, 1)
+                cairo.rectangle(cr, x + 3, y + h - 3, iw - 6, 2)
                 cairo.fill(cr)
-            elseif hover then
-                cairo.set_rgba(cr, sep[1], sep[2], sep[3], 0.35)
-                cairo.rounded_rect(cr, x + 1, y + 2, ITEM_W - 2, h - 4, 4)
+            elseif hov then
+                cairo.set_rgba(cr, sep[1], sep[2], sep[3], 0.30)
+                cairo.rounded_rect(cr, x + 1, y + 2, iw - 2, h - 4, 3)
+                cairo.fill(cr)
+                cairo.set_rgba(cr, sep[1], sep[2], sep[3], 0.60)
+                cairo.rectangle(cr, x + 4, y + h - 3, iw - 8, 2)
+                cairo.fill(cr)
+            else
+                -- Borde inferior sutil en apps no activas.
+                cairo.set_rgba(cr, sep[1], sep[2], sep[3], 0.50)
+                cairo.rectangle(cr, x + 4, y + h - 3, iw - 8, 2)
                 cairo.fill(cr)
             end
+
+            -- Icono
+            local ix = x + PAD_X
+            local iy = y + (h - ICON_SIZE) / 2
             if w.surface then
-                cairo.draw_surface(cr, w.surface,
-                    x + PAD_X, y + (h - ICON_SIZE) / 2,
-                    ICON_SIZE, ICON_SIZE)
+                cairo.draw_surface(cr, w.surface, ix, iy, ICON_SIZE, ICON_SIZE)
             else
                 local label = (w.name or w.class or "?")
                 local after = label:match("—%s*(.+)$")
                 if after then label = after end
-                local letter = label:sub(1, 1):upper()
-                local iw, ih = pango.measure(letter, "DejaVu Sans Bold 12")
+                local first = label:sub(1, 1):upper()
+                local letter = first:match("[A-Z]") and first or "?"
+                local lw2, lh2 = pango.measure(letter, "DejaVu Sans Bold 12")
                 pango.draw_text(cr,
-                    x + (ITEM_W - iw) / 2, y + (h - ih) / 2,
+                    ix + (ICON_SIZE - lw2) / 2,
+                    iy + (ICON_SIZE - lh2) / 2,
                     letter, "DejaVu Sans Bold 12",
                     { r = fg[1], g = fg[2], b = fg[3] })
+            end
+
+            -- Label: solo si t > 0, con fade y clip al ancho actual.
+            if t > 0.01 then
+                local name = truncate(w.name or w.class or "?",
+                                      LABEL_MAX, LABEL_FONT)
+                if name ~= "" then
+                    local tx = ix + ICON_SIZE + LABEL_GAP
+                    local ty = y + (h - 13) / 2
+                    local max_w = iw - PAD_X - ICON_SIZE - LABEL_GAP - PAD_X
+                    cairo.save(cr)
+                    cairo.rectangle(cr, tx, y, max_w, h)
+                    cairo.clip(cr)
+                    pango.draw_text(cr, tx, ty, name, LABEL_FONT,
+                        { r = fg[1], g = fg[2], b = fg[3], a = t })
+                    cairo.restore(cr)
+                end
             end
         end
     end
 
     function TaskList:askMinMax(minw, minh, maxw, maxh)
-        local n = #self.windows
         local total = 0
-        if n > 0 then
-            total = n * ITEM_W + (n - 1) * GAP
+        for i, w in ipairs(self.windows) do
+            total = total + self:_item_width(w)
+            if i > 1 then total = total + GAP end
         end
         return minw + total, minh + self.min_h,
                maxw + total, maxh + self.max_h
     end
 
     function TaskList:on_mouse_move(mx, my)
+        local rects = self:_layout()
         local idx = -1
-        for i, _ in ipairs(self.windows) do
-            local x0 = (i - 1) * (ITEM_W + GAP)
-            if mx >= x0 and mx < x0 + ITEM_W then idx = i; break end
+        for i, r in ipairs(rects) do
+            local lx = r.x - self.x0
+            if mx >= lx and mx < lx + r.w then idx = i; break end
         end
         if idx ~= self.hover_idx then
             self.hover_idx = idx
@@ -629,12 +765,25 @@ M.tasklist = function(T, srv, ctx)
     end
 
     function TaskList:on_mouse_press(mx, my, button)
-        for i, w in ipairs(self.windows) do
-            local x0 = (i - 1) * (ITEM_W + GAP)
-            if mx >= x0 and mx < x0 + ITEM_W then
+        local rects = self:_layout()
+        for _, r in ipairs(rects) do
+            local lx = r.x - self.x0
+            if mx >= lx and mx < lx + r.w then
+                local w = r.item
                 if button == 1 then
+                    if w.active then return end
+                    -- Focus al nodo, y si está en otro desktop, cambiar
+                    -- a ese desktop. Después mover el mouse al centro
+                    -- de la ventana (usando xdotool getwindowgeometry
+                    -- que devuelve variables X Y WIDTH HEIGHT con --shell).
                     os.execute(string.format(
-                        "bspc node %s -f >/dev/null 2>&1 &", w.id))
+                        "bspc desktop -f $(bspc query -D -n %s) >/dev/null 2>&1; "
+                        .. "bspc node %s -f >/dev/null 2>&1; "
+                        .. "sleep 0.1; "
+                        .. "eval $(xdotool getwindowgeometry --shell %s 2>/dev/null); "
+                        .. "xdotool mousemove $((X + WIDTH/2)) $((Y + HEIGHT/2)) "
+                        .. ">/dev/null 2>&1 &",
+                        w.id, w.id, w.id))
                 elseif button == 3 then
                     os.execute(string.format(
                         "bspc node %s -c >/dev/null 2>&1 &", w.id))
@@ -687,44 +836,16 @@ M.tasklist = function(T, srv, ctx)
         return surf
     end
 
-    -- Sincronización completa: se invoca desde start() y desde el
-    -- callback de eventos X (no hay polling).
-    -- Lista global de ventanas via EWMH (client_list). Sin filtro
-    -- de monitor ni workspace: todas las ventanas gestionadas
-    -- aparecen en el tasklist, como hacen las taskbars modernas.
-    local function all_windows()
-        local out = {}
-        for _, wid in ipairs(ewmh:client_list()) do
-            out[#out + 1] = {
-                id     = string.format("0x%x", wid),
-                id_dec = wid,
-            }
-        end
-        return out
-    end
-
-    -- Cache por wid: evitamos xprop repetido para ventanas ya
-    -- conocidas. Solo hacemos xprop cuando aparece una ventana
-    -- nueva (no está en el cache).
-    local window_cache = {}   -- wid_hex -> { class, name, surface }
+    local window_cache = {}
 
     local function fetch_meta(wid_hex)
-        -- xprop para una sola ventana. El batch de xprop no respeta
-        -- el orden de los ids, por eso no lo usamos.
         local h = io.popen(string.format(
             "xprop -id %s WM_CLASS _NET_WM_NAME 2>/dev/null", wid_hex))
         if not h then return { class = nil, name = nil } end
         local meta = { class = nil, name = nil }
         for line in h:lines() do
-            local cls = line:match('WM_CLASS%(STRING%)%s*=%s*"([^"]+)",%s*"([^"]+)"')
-            if cls then
-                -- Segundo string es la clase. Guardamos como tabla
-                -- para mantener la compat con resolve_icon.
-                meta.class = { line:match('"([^"]+)"%s*,%s*"([^"]+)"') }
-                -- Mejor re-extraer los dos:
-                local a, b = line:match('"([^"]+)"%s*,%s*"([^"]+)"')
-                meta.class = { a, b }
-            end
+            local a, b = line:match('WM_CLASS%(STRING%)%s*=%s*"([^"]+)"%s*,%s*"([^"]+)"')
+            if a and b then meta.class = { a, b } end
             local nm = line:match('_NET_WM_NAME%(UTF8_STRING%)%s*=%s*"([^"]*)"')
             if nm then meta.name = nm end
         end
@@ -735,21 +856,15 @@ M.tasklist = function(T, srv, ctx)
     local function sync()
         local c = ewmh:client_list()
         local active_dec = ewmh:active_window()
-
-        -- 1. Marcar los wids vivos para purgar el cache al final.
         local live = {}
         for _, wid in ipairs(c) do live[wid] = true end
-
-        -- 2. Purgar cache de ventanas cerradas.
+        -- Purga del cache de ventanas cerradas.
         for wid_hex in pairs(window_cache) do
             local num = tonumber(wid_hex)
             if not num or not live[num] then
                 window_cache[wid_hex] = nil
             end
         end
-
-        -- 3. Reconstruir la lista; para cada wid, tomar del cache
-        -- o fetchear si es nueva.
         local out = {}
         for _, wid in ipairs(c) do
             local wid_hex = string.format("0x%x", wid)
@@ -757,11 +872,7 @@ M.tasklist = function(T, srv, ctx)
             if not entry then
                 local meta = fetch_meta(wid_hex)
                 local class = meta.class and (meta.class[2] or meta.class[1])
-                local item = {
-                    id    = wid_hex,
-                    class = class,
-                    name  = meta.name,
-                }
+                local item = { id = wid_hex, class = class, name = meta.name }
                 item.surface = resolve_icon(item)
                 entry = item
                 window_cache[wid_hex] = entry
@@ -772,16 +883,6 @@ M.tasklist = function(T, srv, ctx)
         widget:set_windows(out)
     end
 
-    -- Suscripción event-driven: reaccionamos a los PropertyNotify del
-    -- root que nos interesan. Sin polling.
-    --
-    --   _NET_CLIENT_LIST      -> alta/baja de ventanas
-    --   _NET_ACTIVE_WINDOW    -> cambio de foco
-    --   _NET_CURRENT_DESKTOP  -> cambio de escritorio
-    -- Suscripción X: reaccionamos a los PropertyNotify del root.
-    --   _NET_CLIENT_LIST      -> alta/baja de ventanas
-    --   _NET_ACTIVE_WINDOW    -> cambio de foco
-    --   _NET_CURRENT_DESKTOP  -> cambio de escritorio
     local sub_id = ewmh:subscribe(function(atom, wid)
         if atom == ewmh.atoms._NET_CLIENT_LIST
            or atom == ewmh.atoms._NET_ACTIVE_WINDOW
@@ -798,8 +899,7 @@ M.tasklist = function(T, srv, ctx)
         start = function()
             local ok, err = pcall(sync)
             if not ok then
-                log.warn("bar", "tasklist sync (start) fallo: %s",
-                    tostring(err))
+                log.warn("bar", "tasklist sync (start) fallo: %s", tostring(err))
             end
         end,
         stop = function()
