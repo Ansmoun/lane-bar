@@ -373,19 +373,20 @@ end
 -- opts:
 --   size       : tamaño del icono (default 22)
 --   icon       : nombre del icono (default "start")
---   command    : trigger file del launcher (default "/tmp/lane-launcher.cmd")
+--   (el click invoca /opt/lane-launcher/bin/lane-launcher toggle)
 M.start = function(T, srv, ctx)
     local size = 22
     local hex  = T.fg_normal or "#ebdbb2"
     local rgb  = { G.hex_to_rgba(hex) }
     local ico  = make_icon("start", rgb, size)
 
-    -- Click: dispara el toggle del launcher via trigger file. La
-    -- posición del botón la expone lane-bar.lua por el socket
-    -- (comando start-pos), no hace falta publicarla acá.
+    -- Click: dispara el toggle del launcher. Invoca el cliente CLI
+    -- del launcher, que a su vez escribe al socket del daemon.
+    -- Se lanza en background para no bloquear el event loop.
     ico._on_click = function()
-        local f = io.open("/tmp/lane-launcher.cmd", "w")
-        if f then f:write("toggle\n"); f:close() end
+        os.execute(
+            "/opt/lane-launcher/bin/lane-launcher toggle "
+            .. ">/dev/null 2>&1 &")
     end
 
     return { widget = ico }

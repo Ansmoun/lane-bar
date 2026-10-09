@@ -190,11 +190,6 @@ end
 
 local function wants_visible()
     if not _smart_active then return true end
-    -- El launcher escribe este archivo mientras esta abierto. Se
-    -- fuerza el dock visible para que el launcher tenga su base
-    -- y el reveal se sienta como si saliera del dock.
-    local f = io.open("/tmp/lane-launcher-open", "r")
-    if f then f:close() return true end
     local km = xcb.query_keymap(srv.conn)
     if km and xcb.key_pressed(km, super_code) then return true end
     return not has_windows_on_dock_monitor()
@@ -269,15 +264,6 @@ local function write_dock_geometry(geo)
         geo.position or "")
     if _last_published == key then return end
     _last_published = key
-
-    -- Retrocompat: launcher (y cualquier consumidor externo) sigue
-    -- leyendo este archivo mientras dure la transicion.
-    local gf = io.open("/tmp/lane-dock-geometry", "w")
-    if gf then
-        gf:write(string.format("%d %d %d %d\n",
-            geo.x, geo.y, geo.w, geo.h))
-        gf:close()
-    end
 
     apply_bspc_padding(geo)
 end
@@ -539,23 +525,6 @@ reload.install(srv, function()
     rebuild()
 end)
 
-srv:watch_trigger("/tmp/lane-bar.cmd", function(cmd)
-    log.info("bar", "trigger: %s", cmd)
-    local style_name = cmd:match("^style%s+(%S+)$")
-    if style_name then
-        if styles_mod[style_name] then
-            SPEC.style = style_name
-            rebuild()
-        else
-            log.warn("bar", "estilo desconocido: %s", style_name)
-        end
-    elseif cmd == "reload" then
-        rebuild()
-    elseif cmd == "quit" then
-        srv:stop()
-    end
-end)
-
 rebuild()
 -- ─── Socket para otros satélites ────────────────────────────────
 -- Expone consultas read-only sobre el estado de la barra. Lo usa
@@ -603,6 +572,19 @@ local _sock = unix_socket.server {
             local x, y, w, h = start_absolute_pos()
             if not x then return "0 0 0 0" end
             return string.format("%d %d %d %d", x, y, w, h)
+        elseif cmd == "reload" then
+            rebuild()
+            return "ok"
+        elseif cmd == "quit" then
+            srv:stop()
+            return "bye"
+        elseif cmd == "style" then
+            if args and args ~= "" and styles_mod[args] then
+                SPEC.style = args
+                rebuild()
+                return "ok"
+            end
+            return nil, "estilo desconocido: " .. tostring(args)
         end
         return nil, "unknown command: " .. tostring(cmd)
     end,
