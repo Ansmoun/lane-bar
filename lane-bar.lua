@@ -11,6 +11,7 @@ local engine   = require("bar.engine")
 local widgets  = require("bar.widgets")
 local styles_mod = require("bar.styles")
 local bar_themes = require("themes")
+local unix_socket = require("lib.unix_socket")
 local Icons     = require("lib.icons")
 
 -- Encuentra la raíz de LANE (donde vive icons-src/). Orden:
@@ -37,7 +38,6 @@ local function resolve_lane_root()
     return nil
 end
 local xanim      = require("lib.xshape_anim")
-local session    = require("lib.session")   -- [SESSION]
 local config   = require("lib.config")
 
 local SPEC_PATH = "layout.lua"
@@ -47,7 +47,6 @@ anim.init(srv, { fps = 30 })
 
 -- [SESSION] Bus de estado compartido con otros satelites LANE.
 -- Publica "dock" (geometria) y consulta "launcher" (open/closed).
-local sess = session.new(srv, "lane-bar")
 
 local T = theme.load()
 
@@ -189,18 +188,6 @@ local function has_windows_on_dock_monitor()
     return any
 end
 
--- [SESSION] Consulta session.launcher.open. Retrocompat: el archivo
--- /tmp/lane-launcher-open sigue vigente hasta que launcher Fase 1c
--- lo deprecie; ambos canales coexisten.
-local function launcher_open_by_session()
-    local cfg = config.get()
-    if cfg.coupling and cfg.coupling.launcher_open_forces_bar == false then
-        return false
-    end
-    local l = sess:get("launcher")
-    return l and l.open == true
-end
-
 local function wants_visible()
     if not _smart_active then return true end
     -- El launcher escribe este archivo mientras esta abierto. Se
@@ -208,8 +195,6 @@ local function wants_visible()
     -- y el reveal se sienta como si saliera del dock.
     local f = io.open("/tmp/lane-launcher-open", "r")
     if f then f:close() return true end
-    -- [SESSION] Canal nuevo.
-    if launcher_open_by_session() then return true end
     local km = xcb.query_keymap(srv.conn)
     if km and xcb.key_pressed(km, super_code) then return true end
     return not has_windows_on_dock_monitor()
@@ -294,16 +279,7 @@ local function write_dock_geometry(geo)
         gf:close()
     end
 
-    -- [SESSION] Canal nuevo.
     apply_bspc_padding(geo)
-
-    sess:set("dock", {
-        present = true,
-        x = geo.x, y = geo.y,
-        w = geo.w, h = geo.h,
-        monitor = mon_name ~= "" and mon_name or nil,
-        edge    = geo.position,
-    })
 end
 
 local function follow_pointer()
@@ -419,10 +395,6 @@ local function teardown_bar()
     bar_geo    = nil
 end
 
-local function publish_dock_absent()
-    sess:set("dock", { present = false })
-end
-
 -- Cascada de política para follow_cursor y monitor:
 --   config.bar.X  >  tema.X  >  default histórico
 --
@@ -447,7 +419,6 @@ local function rebuild()
 
     if not cfg.bar.enabled then
         teardown_bar()
-        publish_dock_absent()
         _last_published = nil
         _smart_active = false
         log.info("bar", "deshabilitada por config")
@@ -468,7 +439,7 @@ local function rebuild()
     local theme_draw_bg = SPEC.draw_bg
     local eff_spec  = effective_spec(build_spec(), style_mod)
     local geo = geometry.compute(eff_spec, mon)
-    local bar = engine.build(T, eff_spec, widgets, srv, { sess = sess, ewmh = ewmh_inst })
+    local bar = engine.build(T, eff_spec, widgets, srv, { ewmh = ewmh_inst })
 
     local bg = T.bg_card_rgb or T.bg_rgb or { 0.1, 0.1, 0.1 }
     local bg_pixel = math.floor(bg[1] * 255) * 0x10000
@@ -586,14 +557,61 @@ srv:watch_trigger("/tmp/lane-bar.cmd", function(cmd)
 end)
 
 rebuild()
+-- ─── Socket para otros satélites ────────────────────────────────
+-- Expone consultas read-only sobre el estado de la barra. Lo usa
+-- el launcher para anclarse al widget start sin necesidad de
+-- session.json ni archivos temporales.
+--
+-- Protocolo: una línea de comando por conexión, respuesta de una
+-- línea. Comandos:
+--   ping            -> "pong"
+--   dock-geo        -> "x y w h edge monitor"
+--   start-pos       -> "x y w h" (coordenadas ROOT)
+local SOCK_PATH = (os.getenv("XDG_RUNTIME_DIR") or "/tmp")
+                  .. "/lane-bar.sock"
+
+local function start_absolute_pos()
+    if not bar_data or not bar_geo then return nil end
+    local inst = bar_data.instances and bar_data.instances.start
+    if not inst or not inst.widget then return nil end
+    local w = inst.widget
+    -- Los x0/y0 del widget son relativos al padre (0,0 es la
+    -- esquina superior izquierda del client area de la ventana).
+    -- Sumar bar_geo.x / bar_geo.y da coordenadas root absolutas.
+    local x = bar_geo.x + (w.x0 or 0)
+    local y = bar_geo.y + (w.y0 or 0)
+    local sw = (w.x1 or 0) - (w.x0 or 0)
+    local sh = (w.y1 or 0) - (w.y0 or 0)
+    if sw <= 0 or sh <= 0 then return nil end
+    return x, y, sw, sh
+end
+
+local _sock = unix_socket.server {
+    srv  = srv,
+    path = SOCK_PATH,
+    handler = function(cmd, args)
+        if cmd == "ping" then
+            return "pong"
+        elseif cmd == "dock-geo" then
+            if not bar_geo then return "0 0 0 0 none none" end
+            return string.format("%d %d %d %d %s %s",
+                bar_geo.x or 0, bar_geo.y or 0,
+                bar_geo.w or 0, bar_geo.h or 0,
+                bar_geo.position or "top",
+                current_mon and current_mon.name or "none")
+        elseif cmd == "start-pos" then
+            local x, y, w, h = start_absolute_pos()
+            if not x then return "0 0 0 0" end
+            return string.format("%d %d %d %d", x, y, w, h)
+        end
+        return nil, "unknown command: " .. tostring(cmd)
+    end,
+}
+
 log.info("bar", "listo")
 srv:run()
 
 stopping = true
 stop_widgets()
--- [SESSION] Despublicar y desregistrar el cliente.
 clear_bspc_padding()
-
-sess:clear("dock")
-sess:close()
 log.info("bar", "adios")

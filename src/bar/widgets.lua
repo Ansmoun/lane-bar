@@ -376,42 +376,19 @@ end
 --   command    : trigger file del launcher (default "/tmp/lane-launcher.cmd")
 M.start = function(T, srv, ctx)
     local size = 22
-    local ico_name = "start"
-    local trigger  = "/tmp/lane-launcher.cmd"
-    local hex = T.fg_normal or "#ebdbb2"
-    local rgb = { G.hex_to_rgba(hex) }
-    local ico = make_icon(ico_name, rgb, size)
+    local hex  = T.fg_normal or "#ebdbb2"
+    local rgb  = { G.hex_to_rgba(hex) }
+    local ico  = make_icon("start", rgb, size)
 
+    -- Click: dispara el toggle del launcher via trigger file. La
+    -- posición del botón la expone lane-bar.lua por el socket
+    -- (comando start-pos), no hace falta publicarla acá.
     ico._on_click = function()
-        local f = io.open(trigger, "w")
+        local f = io.open("/tmp/lane-launcher.cmd", "w")
         if f then f:write("toggle\n"); f:close() end
     end
 
-    -- Publica la posición del botón en session para que el launcher
-    -- pueda anclarse a él (anchor = "start"). Se hace cada 500ms
-    -- porque la posición real solo se conoce después del primer
-    -- layout del árbol.
-    local timer
-    return {
-        widget = ico,
-        start = function()
-            timer = srv:add_timer(500, function()
-                if not ctx or not ctx.sess then return end
-                local w = (ico.x1 or 0) - (ico.x0 or 0)
-                if w > 0 then
-                    ctx.sess:set("start", {
-                        x = ico.x0, y = ico.y0,
-                        w = w,
-                        h = (ico.y1 or 0) - (ico.y0 or 0),
-                    })
-                end
-            end)
-        end,
-        stop = function()
-            if timer then timer:cancel(); timer = nil end
-            if ctx and ctx.sess then ctx.sess:clear("start") end
-        end,
-    }
+    return { widget = ico }
 end
 
 
@@ -709,11 +686,6 @@ M.tasklist = function(T, srv, ctx)
         return surf
     end
 
-    local function current_monitor()
-        local dock = ctx.sess:get("dock")
-        return dock and dock.monitor or nil
-    end
-
     -- Sincronización completa: se invoca desde start() y desde el
     -- callback de eventos X (no hay polling).
     -- Lista global de ventanas via EWMH (client_list). Sin filtro
@@ -809,20 +781,6 @@ M.tasklist = function(T, srv, ctx)
     --   _NET_CLIENT_LIST      -> alta/baja de ventanas
     --   _NET_ACTIVE_WINDOW    -> cambio de foco
     --   _NET_CURRENT_DESKTOP  -> cambio de escritorio
-    local last_mon = nil
-
-    local function sync_if_monitor_changed()
-        local mon = current_monitor()
-        if mon and mon ~= last_mon then
-            last_mon = mon
-            local ok, err = pcall(sync)
-            if not ok then
-                log.warn("bar", "tasklist sync (monitor) fallo: %s",
-                    tostring(err))
-            end
-        end
-    end
-
     local sub_id = ewmh:subscribe(function(atom, wid)
         if atom == ewmh.atoms._NET_CLIENT_LIST
            or atom == ewmh.atoms._NET_ACTIVE_WINDOW
@@ -834,24 +792,10 @@ M.tasklist = function(T, srv, ctx)
         end
     end)
 
-    -- Suscripción a session.dock: cuando la barra publica/actualiza el
-    -- monitor, re-sincronizamos. Sin esto, el primer sync (durante
-    -- start) puede correr antes de que el dock exista y quedar vacío
-    -- hasta el próximo PropertyNotify del root.
-    if ctx and ctx.sess and ctx.sess.on then
-        ctx.sess:on("dock", function()
-            sync_if_monitor_changed()
-        end)
-    end
-
     return {
         widget = widget,
         start = function()
-            -- Primer sync: si el monitor todavía no está publicado,
-            -- sync() deja el tasklist vacío. El subscriber a
-            -- session.dock se va a encargar de re-sincronizar
-            -- cuando la barra publique el monitor.
-            local ok, err = pcall(sync_if_monitor_changed)
+            local ok, err = pcall(sync)
             if not ok then
                 log.warn("bar", "tasklist sync (start) fallo: %s",
                     tostring(err))
@@ -859,9 +803,6 @@ M.tasklist = function(T, srv, ctx)
         end,
         stop = function()
             if sub_id then ewmh:unsubscribe(sub_id); sub_id = nil end
-            if ctx and ctx.sess and ctx.sess.unwatch then
-                ctx.sess:unwatch("dock")
-            end
         end,
     }
 end
