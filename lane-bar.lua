@@ -39,6 +39,7 @@ local function resolve_lane_root()
 end
 local xanim      = require("lib.xshape_anim")
 local config   = require("lib.config")
+local Launcher = require("launcher")
 
 local SPEC_PATH = "layout.lua"
 
@@ -134,6 +135,8 @@ end
 
 local bar_win, bar_data, bar_starts, bar_stops
 local stopping = false
+local launcher = nil            -- controlador del launcher embebido
+local start_absolute_pos        -- forward decl, se define abajo
 
 local ewmh_inst = ewmh_mod.new(srv)
 
@@ -425,7 +428,7 @@ local function rebuild()
     local theme_draw_bg = SPEC.draw_bg
     local eff_spec  = effective_spec(build_spec(), style_mod)
     local geo = geometry.compute(eff_spec, mon)
-    local bar = engine.build(T, eff_spec, widgets, srv, { ewmh = ewmh_inst })
+    local bar = engine.build(T, eff_spec, widgets, srv, { ewmh = ewmh_inst, launcher = launcher })
 
     local bg = T.bg_card_rgb or T.bg_rgb or { 0.1, 0.1, 0.1 }
     local bg_pixel = math.floor(bg[1] * 255) * 0x10000
@@ -516,14 +519,37 @@ config.watch(srv, function()
         log.warn("bar", "recarga de tema fallo: %s", tostring(new_spec))
     end
     rebuild()
+    if launcher then launcher:invalidate() end
 end)
 
-theme.watch(rebuild)
+theme.watch(function() rebuild(); if launcher then launcher:invalidate() end end)
 reload.install(srv, function()
     log.info("bar", "SIGUSR1: recargando paleta")
     theme.reload_in_place(T)
     rebuild()
+    if launcher then launcher:invalidate() end
 end)
+
+launcher = Launcher.new {
+    srv = srv,
+    T   = T,
+    config = config,
+    bar_state = {
+        geo = function()
+            if not bar_geo or not current_mon then return nil end
+            return {
+                x = bar_geo.x, y = bar_geo.y,
+                w = bar_geo.w, h = bar_geo.h,
+                position = bar_geo.position,
+                monitor  = current_mon.name,
+            }
+        end,
+        start_pos = function()
+            if not start_absolute_pos then return nil end
+            return start_absolute_pos()
+        end,
+    },
+}
 
 rebuild()
 -- ─── Socket para otros satélites ────────────────────────────────
@@ -539,7 +565,7 @@ rebuild()
 local SOCK_PATH = (os.getenv("XDG_RUNTIME_DIR") or "/tmp")
                   .. "/lane-bar.sock"
 
-local function start_absolute_pos()
+start_absolute_pos = function()
     if not bar_data or not bar_geo then return nil end
     local inst = bar_data.instances and bar_data.instances.start
     if not inst or not inst.widget then return nil end
@@ -578,6 +604,15 @@ local _sock = unix_socket.server {
         elseif cmd == "quit" then
             srv:stop()
             return "bye"
+        elseif cmd == "toggle-launcher" then
+            if launcher then launcher:toggle(); return "ok" end
+            return nil, "launcher no inicializado"
+        elseif cmd == "show-launcher" then
+            if launcher then launcher:show(); return "ok" end
+            return nil, "launcher no inicializado"
+        elseif cmd == "hide-launcher" then
+            if launcher then launcher:hide(); return "ok" end
+            return nil, "launcher no inicializado"
         elseif cmd == "style" then
             if args and args ~= "" and styles_mod[args] then
                 SPEC.style = args

@@ -31,12 +31,16 @@ tar -C "$SRC" --exclude='./.git' --exclude='*.bak' --exclude='*.bak-*' \
     -cf - . | tar -C "$DST" -xf -
 chmod -R a+rX,go-w "$DST"
 chmod +x "$DST/run"
+[ -x "$DST/bin/lane-bar" ] && chmod +x "$DST/bin/lane-bar"
 [ -f "$DST/tools/install.sh" ] && chmod +x "$DST/tools/install.sh"
 cd "$DST"
 if ./run -e '
     require("bar.engine")
     require("bar.widgets")
     require("bar.styles")
+    require("launcher")
+    require("launcher.tab")
+    require("launcher.themes")
     print("requires OK")
 ' 2>&1; then
     echo "    OK"
@@ -44,3 +48,12 @@ else
     echo "    FALLO" >&2; exit 1
 fi
 echo "==> Instalación completa. lane-bar en $DST"
+
+if [ -d "/opt/lane-launcher" ]; then
+    echo
+    echo "==> ATENCIÓN: /opt/lane-launcher todavía existe."
+    echo "    El launcher fue fusionado en lane-bar (super+d →"
+    echo "    /opt/lane-bar/bin/lane-bar toggle-launcher)."
+    echo "    Una vez verificado que el atajo funciona, se puede"
+    echo "    borrar con:  sudo rm -rf /opt/lane-launcher"
+fi

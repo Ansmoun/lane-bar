@@ -400,13 +400,17 @@ M.start = function(T, srv, ctx)
     local rgb  = { G.hex_to_rgba(hex) }
     local ico  = make_icon("start", rgb, size)
 
-    -- Click: dispara el toggle del launcher. Invoca el cliente CLI
-    -- del launcher, que a su vez escribe al socket del daemon.
-    -- Se lanza en background para no bloquear el event loop.
+    -- Click: dispara el toggle del launcher. Si la barra expuso el
+    -- controlador en ctx.launcher (fusión), es una llamada en proceso.
+    -- Si no (tema que no recibe ctx o compat), cae al CLI por socket.
     ico._on_click = function()
-        os.execute(
-            "/opt/lane-launcher/bin/lane-launcher toggle "
-            .. ">/dev/null 2>&1 &")
+        if ctx and ctx.launcher then
+            ctx.launcher:toggle()
+        else
+            os.execute(
+                "/opt/lane-bar/bin/lane-bar toggle-launcher "
+                .. ">/dev/null 2>&1 &")
+        end
     end
 
     return { widget = ico }

@@ -1,0 +1,27 @@
+#!/bin/sh
+# lane-bar: CLI para el socket del daemon de la barra.
+#
+# Uso:
+#   lane-bar toggle-launcher
+#   lane-bar show-launcher
+#   lane-bar hide-launcher
+#   lane-bar ping | dock-geo | start-pos | reload | quit
+#   lane-bar style <name>
+#
+# Una línea de comando por invocación. La respuesta se imprime tal
+# cual (el server responde una línea sin \n al final).
+
+SOCK="${XDG_RUNTIME_DIR:-/tmp}/lane-bar.sock"
+
+if [ ! -S "$SOCK" ]; then
+    echo "lane-bar: socket no existe: $SOCK" >&2
+    echo "  ¿está lane-bar corriendo?" >&2
+    exit 1
+fi
+
+if [ $# -eq 0 ]; then
+    echo "uso: lane-bar <cmd> [args]" >&2
+    exit 1
+fi
+
+printf '%s\n' "$*" | nc -U -N "$SOCK"
