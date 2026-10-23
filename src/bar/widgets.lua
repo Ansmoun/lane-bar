@@ -388,12 +388,12 @@ end
 
 
 -- M.start: botón "inicio". Icono clickeable que dispara el toggle
--- del launcher via su trigger file. Usado por los temas kde/win10.
+-- del launcher embebido. Usado por los temas kde/win10.
 --
 -- opts:
 --   size       : tamaño del icono (default 22)
 --   icon       : nombre del icono (default "start")
---   (el click invoca /opt/lane-launcher/bin/lane-launcher toggle)
+--   (el click llama ctx.launcher:toggle() en proceso)
 M.start = function(T, srv, ctx)
     local size = 22
     local hex  = T.fg_normal or "#ebdbb2"
